@@ -47,10 +47,13 @@ def get_engine(address):
     init_db(engine)
     return engine
 
+import logging
+
 try:
-    engine=get_engine(url)
+    engine = get_engine(url)
 except Exception:
-    st.error('数据库暂时不可用，请联系实验组织者。')
+    logging.exception("Neon database connection failed")
+    st.error("数据库暂时不可用，请联系实验组织者。")
     st.stop()
 
 LABELS={'A':'A 更好','TIE':'两者相当','B':'B 更好','UNABLE':'无法判断'}
