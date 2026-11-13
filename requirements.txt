@@ -1,4 +1,4 @@
 streamlit>=1.40,<2
 SQLAlchemy>=2.0,<3
-psycopg2-binary>=2.9,<3
+psycopg[binary]>=3.3,<4
 python-dotenv>=1,<2
