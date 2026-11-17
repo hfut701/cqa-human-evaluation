@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from core import (open_engine, init_db, verify_invitation, fetch_progress,
-                  save_first_stage, submit_correctness)
+                  submit_evaluation)
 
 st.set_page_config(page_title='CQA-RAG 人工评价',page_icon='📋',layout='wide',initial_sidebar_state='expanded')
 
@@ -47,13 +47,10 @@ def get_engine(address):
     init_db(engine)
     return engine
 
-import logging
-
 try:
-    engine = get_engine(url)
+    engine=get_engine(url)
 except Exception:
-    logging.exception("Neon database connection failed")
-    st.error("数据库暂时不可用，请联系实验组织者。")
+    st.error('数据库暂时不可用，请联系实验组织者。')
     st.stop()
 
 LABELS={'A':'A 更好','TIE':'两者相当','B':'B 更好','UNABLE':'无法判断'}
@@ -62,6 +59,7 @@ PREFERENCE_QUESTIONS=[
     ('relevance','Q2 · 相关性','哪份回答更直接回应当前问题的对象、情境和约束？'),
     ('completeness','Q3 · 完整性','哪份回答更充分覆盖解决问题所需的关键点、条件和例外？'),
     ('clarity','Q4 · 易理解性','哪份回答表达更清晰、指代更明确、结构更容易理解？'),
+    ('correctness','Q5 · 正确性','哪份回答的核心事实、规则、政策和推理更正确？'),
 ]
 
 # Never show comparator names, author method, or assignment mapping to evaluator.
@@ -101,7 +99,7 @@ with st.sidebar:
         clear_user();st.rerun()
     st.divider()
     st.markdown('**评价说明**')
-    st.write('先对 A/B 分别给出整体有用性评分，再完成前四项成对评价。提交第一阶段后开放参考材料，最后评价正确性。')
+    st.write('每题只需提交一次：先分别为 A/B 的整体有用性评分，再完成五个维度的成对比较。')
     st.caption('“两者相当”表示可以判断但差异不明显；“无法判断”表示缺少可靠依据，两者会被分别记录。')
 
 try:
@@ -122,9 +120,8 @@ if trial is None:
     st.write('所有评价结果已经保存到实验数据库。可以关闭浏览器。')
     st.stop()
 
-stage_two=trial['overall'] is not None and trial['score_a'] is not None and trial['score_b'] is not None
 st.title('CQA-RAG 人工评估')
-st.caption(f'{domain} 数据集 · 第 {trial["ordinal"]} / {total} 次成对比较 · 当前阶段：'+('正确性核查' if stage_two else '独立质量评价'))
+st.caption(f'{domain} 数据集 · 第 {trial["ordinal"]} / {total} 次成对比较')
 if trial.get('is_demo'):
     st.warning('这是演示题目，不能用于正式研究结论。')
 with st.container(border=True):
@@ -143,61 +140,59 @@ with right:
         st.text_area('匿名回答 B',value=trial['answer_b'],height=290,disabled=True,
                      label_visibility='collapsed',key=f'answer-b-{trial["id"]}')
 
-st.info('请基于问题的信息需求评价两份回答。回答 A、B 的真实来源已匿名化且位置随机。')
-if not stage_two:
-    with st.form(key=f'first-{trial["id"]}'):
-        st.subheader('第一阶段：整体有用性评分与四维成对评价')
-        st.write(f'分别为 A 和 B 的整体有用性评分（0–{score_max}，只能选择整数）。')
-        col_a,col_b=st.columns(2)
-        with col_a:
-            score_a=st.radio('A 的整体有用性', list(range(score_max+1)),horizontal=True,index=None)
-        with col_b:
-            score_b=st.radio('B 的整体有用性', list(range(score_max+1)),horizontal=True,index=None)
-        st.divider()
-        pref={}
-        for key,label,question in PREFERENCE_QUESTIONS:
-            st.markdown(f'**{label}**')
-            st.write(question)
-            pref[key]=st.radio(f'请选择 {label}',options=list(LABELS),
-                                format_func=lambda x:LABELS[x],horizontal=True,index=None,
-                                key=f'{trial["id"]}-{key}',label_visibility='collapsed')
-        next_step=st.form_submit_button('保存第一阶段，进入正确性核查',type='primary',use_container_width=True)
-        if next_step:
-            if score_a is None or score_b is None or any(v is None for v in pref.values()):
-                st.error('请完成 A/B 两项评分及全部四项成对判断。')
-            else:
-                try:
-                    save_first_stage(engine,uid,trial['id'],{'score_a':score_a,'score_b':score_b},pref,score_max)
-                    st.rerun()
-                except Exception as e:
-                    st.error(f'保存失败：{e}')
-else:
-    with st.container(border=True):
-        st.subheader('第一阶段已保存')
-        st.write(f'整体有用性评分：A = {trial["score_a"]}，B = {trial["score_b"]}。前四项成对评价已锁定。')
-        st.caption('为避免参考材料影响此前判断，第一阶段不能在正确性核查后修改。')
-    st.subheader('第二阶段：正确性核查')
-    st.write('请核查回答中的核心事实、规则、政策、推理及其必要适用条件。参考答案只是核查线索，并非唯一正确答案。')
-    with st.expander('查看本题参考材料与核查提示',expanded=True):
-        if trial['reference_text'].strip():
-            st.write(trial['reference_text'])
+st.info('请根据当前问题和回答内容独立判断。正确性指核心事实、规则、政策和推理是否成立，并非与历史采纳答案是否一致。A/B 的来源已匿名化且展示位置随机。')
+
+# All six ratings are on a single page, using a single atomic submission.
+# Saved, unsubmitted first-stage values from an older version are prefilled.
+if trial.get('score_a') is not None and trial.get('score_b') is not None:
+    st.caption('本题存在之前保存但尚未提交的评分；已为您自动填入，可在最终提交前修改。')
+
+with st.form(key=f'evaluation-{trial["id"]}'):
+    st.subheader('整体有用性评分')
+    st.write(f'请分别为回答 A 和 B 的整体有用性打分（0–{score_max}，整数）。')
+    a_col, b_col = st.columns(2)
+    scale = list(range(score_max + 1))
+    saved_a, saved_b = trial.get('score_a'), trial.get('score_b')
+    with a_col:
+        score_a = st.radio('回答 A 的整体有用性', scale, horizontal=True,
+                           index=scale.index(saved_a) if saved_a in scale else None,
+                           key=f'score-a-{trial["id"]}')
+    with b_col:
+        score_b = st.radio('回答 B 的整体有用性', scale, horizontal=True,
+                           index=scale.index(saved_b) if saved_b in scale else None,
+                           key=f'score-b-{trial["id"]}')
+
+    st.divider()
+    st.subheader('五个维度的成对评价')
+    st.caption('“两者相当”表示能够判断，但该维度没有明显差异；“无法判断”表示缺乏足够知识或证据。两个选项分别记录。')
+    preferences = {}
+    options = list(LABELS)
+    for key, label, question in PREFERENCE_QUESTIONS:
+        st.markdown(f'**{label}**')
+        st.write(question)
+        saved = trial.get(key)
+        preferences[key] = st.radio(
+            f'请选择 {label}', options=options,
+            format_func=lambda value: LABELS[value], horizontal=True,
+            index=options.index(saved) if saved in options else None,
+            key=f'{trial["id"]}-{key}', label_visibility='collapsed',
+        )
+        if key == 'correctness':
+            st.caption('依据回答自身的事实、规则和逻辑判断。无需与历史采纳答案一致；若无法可靠判断，请选择“无法判断”。')
+
+    reason = st.text_area('补充理由（可选）', value=trial.get('reason') or '',
+                          max_chars=3000,
+                          placeholder='例如明显的事实错误、关键遗漏、适用条件、或无法判断的原因。')
+    submit = st.form_submit_button('提交本题，进入下一题', type='primary', use_container_width=True)
+    if submit:
+        if score_a is None or score_b is None or any(v is None for v in preferences.values()):
+            st.error('请完成 A/B 的整体有用性评分，以及五个维度的全部成对判断。')
         else:
-            st.warning('本题未附参考材料，请根据可靠来源核查；若缺少足够依据请选择“无法判断”。')
-        st.caption('注意政策适用时间、游戏系统及版本。与采纳答案不同的解释也可能成立。')
-    with st.form(key=f'second-{trial["id"]}'):
-        st.markdown('**Q5 · 正确性**')
-        st.write('哪份回答的核心事实、规则、政策和推理更正确？')
-        correctness=st.radio('正确性评价',list(LABELS),
-            format_func=lambda x: LABELS[x],horizontal=True,index=None,label_visibility='collapsed')
-        reason=st.text_area('补充理由（可选）',max_chars=3000,
-            placeholder='可简述明显错误、关键遗漏、政策版本差异或无法判断的原因。')
-        done_btn=st.form_submit_button('提交本题，进入下一题',type='primary',use_container_width=True)
-        if done_btn:
-            if correctness is None:
-                st.error('请先完成 Q5 正确性判断。')
-            else:
-                try:
-                    submit_correctness(engine,uid,trial['id'],correctness,reason)
-                    st.rerun()
-                except Exception as e:
-                    st.error(f'提交失败：{e}')
+            try:
+                submit_evaluation(engine, uid, trial['id'],
+                                  {'score_a': score_a, 'score_b': score_b},
+                                  preferences, reason, score_max)
+                st.rerun()
+            except Exception:
+                # Avoid exposing database internals or connection strings to visitors.
+                st.error('提交失败，评价记录未更改。请刷新后重试或联系实验组织者。')

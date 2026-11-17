@@ -238,6 +238,59 @@ def submit_correctness(engine,eid,trial_id,correctness,reason):
             {'correctness':correctness,'reason':reason.strip(),'ts':now(),'tid':trial_id})
 
 
+
+def submit_evaluation(engine, eid, trial_id, scores, prefs, reason, score_max):
+    # One-page evaluation: both scores and all five preferences saved atomically.
+
+    # Compatible with the previous schema and unsubmitted first-stage answers.
+    # Never modify already submitted trials.
+    for key in ('score_a', 'score_b'):
+        value = scores.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= score_max:
+            raise ValueError(f'{key} 必须是 0–{score_max} 的整数')
+    for dimension in DIMENSIONS:
+        if prefs.get(dimension) not in CHOICES:
+            raise ValueError(f'请完成 {dimension} 维度的成对评价')
+    if not isinstance(reason, str) or len(reason) > 3000:
+        raise ValueError('补充理由不能超过3000字')
+
+    timestamp = now()
+    values = dict(
+        tid=trial_id, eid=eid, score_a=scores['score_a'], score_b=scores['score_b'],
+        overall=prefs['overall'], relevance=prefs['relevance'],
+        completeness=prefs['completeness'], clarity=prefs['clarity'],
+        correctness=prefs['correctness'], reason=reason.strip(), ts=timestamp,
+    )
+    with engine.begin() as con:
+        trial = con.execute(text("""SELECT t.id, r.trial_id AS existing_response,
+                                            r.submitted_at
+              FROM trials t LEFT JOIN responses r ON r.trial_id=t.id
+              WHERE t.id=:tid AND t.evaluator_id=:eid"""), values).mappings().first()
+        if not trial:
+            raise ValueError('评价任务不存在或不属于当前评估者')
+        if trial['submitted_at'] is not None:
+            raise ValueError('本题已经提交，不允许重复修改')
+
+        if trial['existing_response'] is not None:
+            result = con.execute(text("""UPDATE responses SET
+                score_a=:score_a, score_b=:score_b,
+                overall=:overall, relevance=:relevance,
+                completeness=:completeness, clarity=:clarity,
+                correctness=:correctness, reason=:reason,
+                saved_at=:ts, submitted_at=:ts
+                WHERE trial_id=:tid AND evaluator_id=:eid AND submitted_at IS NULL"""), values)
+            if result.rowcount != 1:
+                raise ValueError('保存失败：任务状态已变更，请刷新页面')
+        else:
+            con.execute(text("""INSERT INTO responses
+                (trial_id, evaluator_id, score_a, score_b,
+                 overall, relevance, completeness, clarity, correctness,
+                 reason, saved_at, submitted_at)
+                VALUES (:tid, :eid, :score_a, :score_b,
+                        :overall, :relevance, :completeness, :clarity, :correctness,
+                        :reason, :ts, :ts)"""), values)
+
+
 EXPORT_FIELDS=['evaluator_id','domain','ordinal','question_id','comparator','method_a','method_b',
     'score_a','score_b','score_ours','score_comparator','score_difference',
     'overall','relevance','completeness','clarity','correctness',
