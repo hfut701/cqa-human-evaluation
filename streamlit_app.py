@@ -15,10 +15,46 @@ st.set_page_config(page_title='CQA-RAG 人工评价',page_icon='📋',layout='wi
 
 STYLES = '''
 <style>
-.block-container {max-width: 1360px; padding-top: 1.8rem; padding-bottom: 5rem;}
-div[data-testid="stForm"] {border-radius: 14px; background: #f9fbff; border: 1px solid #dce6f3; padding: 18px;}
-[data-testid="stSidebar"] {background: #f6f9fd;}
-[data-testid="stTextArea"] textarea {font-size: .96rem; line-height: 1.55;}
+/* 统一深色文字和高对比度学术阅读界面。 */
+[data-testid="stAppViewContainer"] {background-color: #F4F7FB;}
+.block-container {max-width: 1500px; padding-top: 1.6rem; padding-bottom: 5rem;}
+[data-testid="stSidebar"] {background: #EDF2F9;}
+[data-testid="stMarkdownContainer"] {color: #17283F;}
+[data-testid="stMarkdownContainer"] p,
+[data-testid="stMarkdownContainer"] li {color: #23354E; line-height: 1.72;}
+[data-testid="stMarkdownContainer"] a {color: #1557A8; text-decoration: underline;}
+[data-testid="stVerticalBlockBorderWrapper"] {
+    background: #FFFFFF;
+    border-color: #B8C8DD !important;
+    border-radius: 12px;
+}
+div[data-testid="stForm"] {
+    background: #FFFFFF;
+    border: 1px solid #B8C8DD;
+    border-radius: 14px;
+    box-shadow: 0 3px 12px rgba(26, 47, 77, .045);
+    padding: 1.25rem 1.5rem;
+}
+/* 增强阅读区文字和标题的识别度，防止以往 disabled 文本框的发灰问题。 */
+[data-testid="stVerticalBlockBorderWrapper"] [data-testid="stMarkdownContainer"] {color:#182A43;}
+[data-testid="stRadio"] label {color: #203451 !important;}
+[data-testid="stWidgetLabel"] {color: #203451; font-weight: 600;}
+.score-scale-legend {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: .8rem;
+    max-width: 465px;
+    margin: -.35rem 0 .75rem 0;
+    font-size: .81rem;
+    color: #405773;
+}
+.score-scale-legend span:last-child {text-align: right;}
+.score-scale-legend strong {color: #213C61;}
+@media(max-width:720px) {
+    .block-container {padding-left: 1rem; padding-right: 1rem;}
+    .score-scale-legend {max-width:100%; font-size:.75rem;}
+}
 </style>'''
 st.markdown(STYLES,unsafe_allow_html=True)
 
@@ -37,8 +73,8 @@ if not url:
     st.stop()
 
 score_max=int(secret_value('SCORE_MAX','7'))
-if score_max not in (7,10):
-    st.error('SCORE_MAX 必须设为 7 或 10。')
+if score_max != 7:
+    st.error('本版实验统一使用 1–7 分，请将 SCORE_MAX 设置为 7。')
     st.stop()
 
 @st.cache_resource(show_spinner=False)
@@ -128,17 +164,21 @@ with st.container(border=True):
     st.subheader('Target Question · 目标问题')
     st.write(trial['question_text'])
 
-left,right=st.columns(2,gap='medium')
+# Long answers are rendered as readable Markdown rather than disabled grey textareas.
+# In standard mode both responses have equal-height scrollable reading areas;
+# evaluators can expand them fully if desired.
+expand_answers = st.toggle('展开 A/B 完整回答（不限制高度）', value=False,
+                           key=f'expand-answers-{trial["id"]}')
+reading_height = None if expand_answers else 560
+left, right = st.columns(2, gap='large')
 with left:
-    with st.container(border=True):
-        st.markdown('#### Response A')
-        st.text_area('匿名回答 A', value=trial['answer_a'], height=290, disabled=True,
-                     label_visibility='collapsed',key=f'answer-a-{trial["id"]}')
+    st.markdown('#### Response A')
+    with st.container(height=reading_height, border=True):
+        st.markdown(trial['answer_a'] or '（此回答为空）')
 with right:
-    with st.container(border=True):
-        st.markdown('#### Response B')
-        st.text_area('匿名回答 B',value=trial['answer_b'],height=290,disabled=True,
-                     label_visibility='collapsed',key=f'answer-b-{trial["id"]}')
+    st.markdown('#### Response B')
+    with st.container(height=reading_height, border=True):
+        st.markdown(trial['answer_b'] or '（此回答为空）')
 
 st.info('请根据当前问题和回答内容独立判断。正确性指核心事实、规则、政策和推理是否成立，并非与历史采纳答案是否一致。A/B 的来源已匿名化且展示位置随机。')
 
@@ -149,18 +189,26 @@ if trial.get('score_a') is not None and trial.get('score_b') is not None:
 
 with st.form(key=f'evaluation-{trial["id"]}'):
     st.subheader('整体有用性评分')
-    st.write(f'请分别为回答 A 和 B 的整体有用性打分（0–{score_max}，整数）。')
-    a_col, b_col = st.columns(2)
-    scale = list(range(score_max + 1))
+    st.write('请根据当前问题的信息需求，综合判断回答在多大程度上能够为用户提供有用的信息，并分别对回答 A 和 B 进行1–7分评价。')
+    a_col, b_col = st.columns(2, gap='large')
+    scale = list(range(1, 8))  # Never expose score 0.
     saved_a, saved_b = trial.get('score_a'), trial.get('score_b')
     with a_col:
         score_a = st.radio('回答 A 的整体有用性', scale, horizontal=True,
                            index=scale.index(saved_a) if saved_a in scale else None,
                            key=f'score-a-{trial["id"]}')
+        st.markdown('''<div class="score-scale-legend">
+            <span><strong>1 分</strong> · 几乎无法满足信息需求</span>
+            <span><strong>7 分</strong> · 充分满足信息需求</span>
+        </div>''', unsafe_allow_html=True)
     with b_col:
         score_b = st.radio('回答 B 的整体有用性', scale, horizontal=True,
                            index=scale.index(saved_b) if saved_b in scale else None,
                            key=f'score-b-{trial["id"]}')
+        st.markdown('''<div class="score-scale-legend">
+            <span><strong>1 分</strong> · 几乎无法满足信息需求</span>
+            <span><strong>7 分</strong> · 充分满足信息需求</span>
+        </div>''', unsafe_allow_html=True)
 
     st.divider()
     st.subheader('五个维度的成对评价')
